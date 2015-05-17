@@ -1,0 +1,514 @@
+---
+title: "Practical machine learning:  Comparisson of methods applied on the exercise measurements data"
+author: Vedrana Balicevic
+output: html_document
+---
+
+###Introduction:
+In this report I explain the use and the possibilites of different classification models, and the belonging model accuracies, with the application to exercise data as explained in the text.
+Specifically, I built decision tree and random forest predictors without and with cross-validation.
+These models were used to predict the classe variable in the given dataset, ie. they are classifying the manner in which the exercise was performed into 5 classes based on different measurements available in the dataset. 
+Results and comments are given in the Conclusion section. Codes are in the Appendix.
+
+###Problem description (taken from course project description)
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset). 
+
+###Data
+
+####Reading the data
+
+The data for this project was downloaded from the following sources: 
+
+```{r readData0, warning = FALSE, cache = TRUE}
+trainUrl = "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+testUrl = "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+```
+
+```{r intro, warning = FALSE, cache = TRUE, message = FALSE, echo = FALSE}
+# Attaching packages we will need
+library(corrplot)
+library(caret)
+library(rattle)
+library(ggplot2)
+library(rpart)
+library(rpart.plot)
+library(party)
+library(randomForest)
+library(e1071)      
+
+# Setting the seed for results reproducibility
+set.seed(1212)
+```
+
+####About 
+
+The original dataset contains `ncol(train)`=`r ncol(train)` columns, ie. variables that describe:
+
+- different personal information: ID number / start time / finish time,
+
+- and different measurements: movement amplitude / kurtosis / skewness / min / max / average / var / total,
+
+- on different body parts: forearm / dumbell / jaw / belt
+
+obtained with:
+ 
+- different sensors: accelerometer / gyroscope / magnet
+
+- different direction of measurement: x / y / z / jaw /pitch / roll
+
+Complete list of variables can be obtained with R  statements `names(train)` and `str(train)`.
+
+R output is skipped here because the list of variables is too extensive for this report.
+
+Train dataset has `nrow(train)`=`r nrow(train)` rows, meaning `nrow(train)` subjects for who the measurements are available.
+
+####Data preparation
+
+After examining the variables, we will clean the data in the following way:
+
+A) exclude variables that are not related to the output (person ID, starting time of the excersice, ending time, etc.)
+
+B) exclude variables with NA values - I choose to exclude variables with any occurence of NAs, otherwise I'd also have to impute NAs.
+
+C) exclude variables that have very small variance - the R chunk shows that leftover variables don't have variance as close to zero as we thought they might, so there is no reason to exclude any one of them.
+
+D) exclude variables that are highly correlated to other variables - we see that some pairs of variables are highly correlated.
+
+E) apply Principal Component Analysis (PCA) which is a good way of rearranging variables and excluding redundant variables (correlated ones).
+
+*Alternatives:*
+
+Also, as I mentioned before, instead of removing all NAs, there is an option of imputing some of them if there are not too many NAs along the column. Here i skip this option cause its either all NAs or none of them per column.
+
+*Important:*
+
+It is also important to remember that all data preprocessing that is done on training data needs to be done on test data as well.
+
+**Mid-results obtained with C and D: List of least variance variables, and cross-correlation table.**
+
+```{r readData, warning = FALSE, cache = TRUE, echo = FALSE}
+# Set the working directory
+myFolder <- "C:/Users/Vedrana/Desktop/dokumenti/education/The Data Science Specialization/Course 8 - Practical Machine Learning/PML - PA"
+setwd(myFolder)
+
+# Check if the files were already downloaded
+if (!file.exists("./pml-testing.csv")){
+  download.file(trainUrl)
+  download.file(testUrl)
+  }
+
+# Then read the data
+train <- read.csv("pml-training.csv", na.strings=c("NA","#DIV/0!","")) 
+test  <- read.csv("pml-testing.csv", na.strings=c("NA","#DIV/0!",""))
+
+# Otherwise just read directly from URL without downloading
+# train <- read.csv(url(trainUrl));
+# test  <- read.csv(url(testUrl));
+
+# Decimate the data cause with so many predictors it gets slow
+indTrain <- sample(1:nrow(train), 2000, replace=F)
+train    <- train[indTrain,]
+```
+
+```{r exploreData, eval = FALSE, warning = FALSE, cache = TRUE, echo = FALSE}
+names(train)
+str(train)
+```
+
+```{r cleanData, warning = FALSE, cache = TRUE, echo = FALSE}
+
+# A) Index irrelevant variables (non-informative with respect to classes) using LOGICAL indexing
+indIDcol <- colSums(is.na(train)) <0
+indIDcol[1:7] <- TRUE
+
+# B) Remove NA data. Alternative methods are provided here. Methods B3+B4 were chosen.
+
+# B1: Index only COLUMNS that are COMPLETELY NAs
+indNAcol <- colSums(is.na(train)) == nrow(train)
+
+# B2: Method to remove COLUMNS where NA values are over 10% of values
+indNAcol <- colSums(is.na(train)) >= 0.1*nrow(train)
+
+# B3: Index COLUMNS with ANY number of NAs
+indNAcol <- colSums(is.na(train)) != 0
+
+# B4: Index ROWS that include ANY NAs (that are incomplete)
+indNArow <- !complete.cases(train);
+
+# A+B) Remove irrelevant variables and variables with NAs
+trainOrig <- train
+testOrig  <- test
+
+# Removal of rows (subjects) affects only train data. 
+# Removal of columns (variables) affects train and test data.
+train     <- train[-indNArow,]
+train     <- train[,!(indIDcol | indNAcol)]
+test      <- test[,!(indIDcol | indNAcol)]
+
+numVariables <- length(names(train))
+
+# C) Calculate variances within variables, order by variance and show only the top several
+trainNZV <- nearZeroVar(train, saveMetrics = TRUE)
+trainBuildNZV <- trainNZV[with(trainNZV,order(freqRatio)),]
+head(trainBuildNZV)
+
+# D) Correlation
+corMat <- cor(train[,-numVariables])
+corrplot(corMat, order = "FPC", method = "color", type = "lower", tl.cex=0.8, tl.col = rgb(0,0,0))
+
+# E) PCA with caret
+preProc  <- preProcess(train[,-numVariables], method = "pca", thresh = 0.99)
+trainPCA <- predict(preProc, train[,-numVariables])
+testPCA  <- predict(preProc, test[,-numVariables])
+trainPCA$classe <- train$classe
+```
+
+Here I plot variances before and after applying PCA. We see that before PCA we have much more variables, and many of them have really low variance, while after PCA there are less components that represent variables, but with larger variances.
+
+```{r plotVariances, warning = FALSE, cache = TRUE, echo = FALSE}
+# Plot the sorted variance contained in original variables and in principal components
+varV  <- sapply(train[,-ncol(train)],var)
+varP  <- sapply(trainPCA[,-ncol(trainPCA)],var) 
+dfV <- data.frame(keyName=names(varV), value=varV, row.names=NULL)
+dfP <- data.frame(keyName=names(varP), value=varP, row.names=NULL)
+
+g1 <- ggplot() + 
+  geom_bar(data = dfV, aes (x = reorder(keyName, -value), y=value, alpha = value, fill = value),
+           stat = "identity", color = "blue") +
+  guides(fill=FALSE,alpha = FALSE) +
+  theme(axis.text.x = element_text(angle=90)) +
+  labs(title = "Variable variance", x = "Variable name")
+
+g2 <- ggplot() + 
+  geom_bar(data = dfP, aes (x = reorder(keyName, -value), y=value, alpha = value, fill = "red"),
+           stat = "identity", color = "red") +
+  guides(fill=FALSE,alpha = FALSE) +
+  theme(axis.text.x = element_text(angle=90)) +
+  labs(title = "Principal component variance", x = "Principal component name")
+
+print(g1)
+print(g2)
+```
+
+###Data partitioning
+
+Now, important step is to distribute our datasets in the following way:
+
+- TRAINING SET - we separate in into 2 sets:
+  
+$\qquad$   -- `trainBuild` - for creating the model (with whole dataset or cross-validated, depending on the model). 
+
+$\qquad \qquad \qquad \qquad \,$ Error obtained with this is in-sample error.
+  
+$\qquad$  -- `trainEval` - for evaluating the model. error obtained with this is out-of-sample error.
+
+- TEST SET - we leave it as it is because it's ONLY for applying the model on the new data, not for evaluating the accuracy of our model
+
+
+```{r separateData, warning = FALSE, cache = TRUE, echo = FALSE}
+# Distribute datasets
+inBuild    <- createDataPartition(y = train$classe, p = 0.75, list = FALSE)
+
+trainBuild <- train[inBuild,]
+trainEval  <- train[-inBuild,]
+
+trainBuildPCA <- trainPCA[inBuild,]
+trainEvalPCA  <- trainPCA[-inBuild,]
+```
+
+###Building predictors
+
+I decided to try the following predictors on data before PCA and data after PCA:
+
+- Decision tree with and without cross-validation
+
+- Random forest
+
+Each predictor was built with 2 different packages, for practice and for the comparisson. From what I  have read, random forest probably does not need cross-validation because of how it internally works.
+
+An example of an obtained tree:
+
+```{r buildModelsTree, cache = TRUE, echo = FALSE, message = FALSE}
+## Single tree, but with CV
+
+library(caret)
+trainPar = trainControl(method = "cv", number = 4)
+rpartPar = rpart.control(cp = 0, xval = 4)
+
+## Train a single decision tree, apply it to the evaluation data
+
+# M1: Using Caret
+
+modFit1      <- train(classe ~ ., data = trainBuild, method = "rpart")
+evalPred1    <- predict(modFit1, newdata = trainEval)
+ModelInfo1   <- confusionMatrix(data = evalPred1, reference = trainEval$classe)
+
+modFit1CV    <- train(classe ~ ., data = trainBuild, method = "rpart", trControl = trainPar)
+evalPred1CV  <- predict(modFit1CV, newdata = trainEval)
+ModelInfo1CV <- confusionMatrix(data = evalPred1CV, reference = trainEval$classe)
+
+modFit1CVpca    <- train(classe ~ ., data = trainBuildPCA, method = "rpart", trControl = trainPar)
+evalPred1CVpca  <- predict(modFit1CVpca, newdata = trainEvalPCA)
+ModelInfo1CVpca <- confusionMatrix(data = evalPred1CVpca, reference = trainEvalPCA$classe)
+
+modFit1PCV    <- train(classe ~ ., data = trainBuild, method = "rpart", 
+                      preProcess = c("center", "scale"), trControl = trainPar)
+evalPred1PCV  <- predict(modFit1PCV, newdata = trainEval)
+ModelInfo1PCV <- confusionMatrix(data = evalPred1PCV, reference = trainEval$classe)
+
+# M2: Using rpart
+
+modFit2      <- rpart(classe ~ ., data = trainBuild, method = "class")
+evalPred2    <- predict(modFit2, trainEval, type = "class")
+ModelInfo2   <- confusionMatrix(data = evalPred2, reference = trainEval$classe)
+
+modFit2CV    <- rpart(classe~., method = "class", data = trainBuild, control = rpartPar)
+evalPred2CV  <- predict(modFit2CV, trainEval, type = "class")
+ModelInfo2CV <- confusionMatrix(data = evalPred2CV, reference = trainEval$classe)
+
+modFit2PCA   <- rpart(classe ~ ., data = trainBuildPCA, method = "class")
+evalPred2PCA <- predict(modFit2PCA, trainEvalPCA, type = "class")
+ModelInfo2PCA<- confusionMatrix(data = evalPred2PCA, reference = trainEval$classe)
+
+```
+
+```{r plotTree, cache = TRUE, echo = FALSE, message = FALSE}
+# Plot the tree
+fancyRpartPlot(modFit2)
+```
+
+```{r buildModelsForest, cache = TRUE, echo = FALSE, message = FALSE}
+
+## Train a random forest, apply it to the evaluation data
+
+# M3: Train random forest with caret package
+
+modFit3      <- train(classe~ ., data = trainBuild, method = "rf", prox = TRUE)
+evalPred3    <- predict(modFit3, newdata = trainEval)
+ModelInfo3   <- confusionMatrix(data = evalPred3, reference = trainEval$classe)
+
+# M4: Train random forest with randomforest package
+modFit4      <- randomForest(classe ~. , data = trainBuild)
+evalPred4    <- predict(modFit4, newdata = trainEval, type = "class")
+ModelInfo4   <- confusionMatrix(data = evalPred4, reference = trainEval$classe)
+
+modFit4PCA      <- randomForest(classe ~. , data = trainBuildPCA)
+evalPred4PCA    <- predict(modFit4PCA, newdata = trainEvalPCA, type = "class")
+ModelInfo4PCA   <- confusionMatrix(data = evalPred4PCA, reference = trainEval$classe)
+```
+
+
+```{r results, warning = FALSE, cache = TRUE, echo = FALSE}
+# Put accuracy values for all models in a single data.frame for a table-like display of results:
+accuracyTable <- data.frame(rbind(
+                      cbind(ModelInfo1$overall[1], ModelInfo1CV$overall[1], ModelInfo1PCV$overall[1], ModelInfo1CVpca$overall[1]),
+                      cbind(ModelInfo2$overall[1], ModelInfo2CV$overall[1], NaN, ModelInfo2PCA$overall[1]),
+                      cbind(ModelInfo3$overall[1], NaN, NaN, NaN),
+                      cbind(ModelInfo4$overall[1], NaN, NaN, ModelInfo4PCA$overall[1])))
+rownames(accuracyTable) <- c("Tree with caret", "Tree with rpart", 
+                       "Random Forest with caret", "Random Forest with randomForest")
+colnames(accuracyTable) <- c("Whole set", "CV", "PP + CV", "PCA")
+```
+
+### Results and conclusions
+
+Though i tried to slowly build up the model and compare all models accuracies, a lot of options occured along the way so I had to stop at what I described in this report. Also, the data is too big to wait for so many models to be built.
+
+Here is the table of accuracies (out of sample) of all predictors I built.
+
+CV = cross validation, PP = built-in preprocessing (centering and normalizing), PCA = principal component analysis.
+
+```{r echo=FALSE}
+round(accuracyTable,4)
+```
+
+From this table we see that the out-of-sample accuracy didn't change by introducing cross-validation.
+PCA reduces accuracy because it removes some of the variables, however it reduces the data size and therefore can fasten the code up at the expense of accuracy.
+The largest accuracy `r max(round(accuracyTable,4),na.rm=TRUE)` was obtained with random forest predictor from the caret package, and without any variable transformation.
+
+Here is also the variable importance plot for the most accurate predictor:
+
+```{r importancePlot, warning = FALSE, cache = TRUE, echo = FALSE}
+# Importance plot
+imp4 <- modFit4$importance[,1]
+df4  <- data.frame(keyName=names(imp4), value=imp4, row.names=NULL)
+g3   <- ggplot() + 
+    geom_bar(data = df4, aes (x = reorder(keyName, -value), y=value, alpha = 0.3), 
+             stat = "identity", color = "purple", fill = "purple") +
+    guides(fill=FALSE,alpha = FALSE) +
+    theme(axis.text.x = element_text(angle=90)) +
+    labs(title = "Variable importance obtained from the predictor", x = "Variable name")
+print(g3)
+```
+
+What we can notice from this plot that the variables importance is not necesarily related to variables variance (which is given in the plot before). 
+
+####Test set
+
+I selected the model with the highest accuracy to run it on the test set. 
+To run and submit the results, I used the code provided in the Project description website.
+
+```{r testSetPredict, echo = FALSE}
+finalModel <- modFit3
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+testPrediction <- predict(finalModel, newdata = test)
+pml_write_files(testPrediction)
+```
+
+### Note
+
+I reduced the train data size because of the capabilities of my computer (while it can compute these models in normal mode, it gets very slow in markdown mode). From the original 19622 rows I reduced it to 2000 rows, and the best accuracy I obtained was `r max(round(accuracyTable,4),na.rm=TRUE)`, which I'm quite happy with considering the data shrinking. 
+The code is quite extensive because I wanted to do a proper analysis, including the things that were out of the scope of this project.
+
+I prefer to give all code in Appendix, not to interfere with the explanations, and to supress all the (irrelevant) messages that R returns.
+
+-----------------------------------------------------------------------------------------
+
+###  APPENDIX
+
+#### A1. Libraries and seed
+
+```{r intro, eval = FALSE}
+```
+
+#### A2. Reading data
+
+```{r readData0, eval = FALSE}
+```
+
+```{r readData, eval = FALSE}
+```
+
+#### A3. Cleaning data
+
+```{r cleanData, eval = FALSE}
+```
+
+```{r plotVariances, eval = FALSE}
+```
+
+#### A4. Separating data
+
+```{r separateData, eval = FALSE}
+```
+
+#### A5. Building tree predictors
+
+```{r buildModelsTree, eval = FALSE}
+```
+
+```{r plotTree, eval = FALSE}
+```
+
+#### A5. Building random forest predictors
+
+```{r buildModelsForest, eval = FALSE}
+```
+
+#### A6. Combine the results into accuracy table
+
+```{r results, eval = FALSE}
+```
+
+#### A7. Variable importance plot from the predictor
+
+```{r importancePlot, eval = FALSE}
+```
+
+
+#### A8. Test set prediction
+
+```{r testSetPredict, eval = FALSE}
+```
+
+
+```{r, echo=FALSE, eval = FALSE}
+# 
+# Train trees with bagging with parameter B = 5 
+# (even B=5 was quite CPU demanding for my laptop, B=10 caused a memory size error)
+#treebag = bag(trainBuild[,1:20], trainBuild[,21], B=5, 
+ #             bagControl = bagControl(fit = ctreeBag$fit,
+  #                                    predict = ctreeBag$pred,
+   #                                   aggregate = ctreeBag$aggregate))
+# cross-validation
+
+
+# var_names <- names(train) # look for accelerator and classe variables only
+# var_ind <- grep("accel|classe",var_names) 
+# train <- train[,var_ind]
+
+# Check if variables are factors
+indFact <- t(t(sapply(trainX,is.factor)))
+
+fact2int <- function(df) as.numeric(levels(df))[as.integer(df)] 
+sapply(train[,indFact], fact2int)
+
+na_test = sapply(training, function(x) {sum(is.na(x))})
+table(na_test)
+bad_columns = names(na_test[na_test==13460])
+training = training[, !names(training) %in% bad_columns]
+
+# Not used: Impute leftover NA values 
+numVariables <- length(names(trainX))
+preObj  <- preProcess (trainX$magnet_forearm_x, method = "knnImpute")
+trainX$magnet_forearm_x <- predict(preObj,trainX$magnet_forearm_x)
+
+# Not used: PCA with caret
+preProc  <- preProcess(train[,-varNumber],method="pca",pcaComp = 10)
+trainPCA <- predict(preProc, train[,-varNumber])
+testPCA  <- predict(preProc, test[,-varNumber])
+qplot(trainPCA$PC1, trainPCA$PC2, colour = trainingSet$classe)
+
+
+# Not used: PCA with prcomp
+prComp <- prcomp(train[,-varNumber])
+screeplot(prComp, type = "l")
+
+# PCA with caret
+preProc  <- preProcess(train[,-varNumber], method = "pca", thresh = 0.99)
+trainPCA <- predict(preProc, train[,-varNumber])
+testPCA  <- predict(preProc, train[,-varNumber])
+
+# Plot the sorted variance contained in original variables and in principal components
+varV  <- sapply(train[,-ncol(train)],var)
+varP  <- sapply(trainPCA[,-ncol(trainPCA)],var) 
+dfV <- data.frame(keyName=names(varV), value=varV, row.names=NULL)
+dfP <- data.frame(keyName=names(varP), value=varP, row.names=NULL)
+
+g1 <- ggplot() + geom_bar(data = dfV, aes (x = reorder(keyName, -value), y=value, alpha = value, fill = value), stat = "identity", color = "blue") +
+  guides(fill=FALSE,alpha = FALSE) +
+  theme(axis.text.x = element_text(angle=90)) +
+  labs(title = "Variable variance", x = "Variable name")
+
+g2 <- ggplot() + geom_bar(data = dfP, aes (x = reorder(keyName, -value), y=value, alpha = value, fill = "red"), stat = "identity", color = "red") +
+  guides(fill=FALSE,alpha = FALSE) +
+  theme(axis.text.x = element_text(angle=90)) +
+  labs(title = "Principal component variance", x = "Principal component name")
+
+print(g1)
+print(g2)
+
+modFit4$importance
+
+g2 <- ggplot() + geom_bar(data = dfP, aes (x = reorder(keyName, -value), y=value, alpha = value, fill = "red"), stat = "identity", color = "red") +
+  guides(fill=FALSE,alpha = FALSE) +
+  theme(axis.text.x = element_text(angle=90)) +
+  labs(title = "Principal component variance", x = "Principal component name")
+
+imp4 <- modFit4$importance[,1]
+df4  <- data.frame(keyName=names(imp4), value=imp4, row.names=NULL)
+g3   <- ggplot() + 
+    geom_bar(data = df4, aes (x = reorder(keyName, -value), y=value, alpha = value, fill = "green"), stat = "identity", color = "green") +
+     guides(fill=FALSE,alpha = FALSE) +
+     theme(axis.text.x = element_text(angle=90)) +
+     labs(title = "Principal component variance", x = "Principal component name")
+print(g3)
+
+```
